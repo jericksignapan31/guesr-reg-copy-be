@@ -1,14 +1,14 @@
 import { ConfigService } from '@nestjs/config';
 
 // Matches every Vercel preview deployment for this project, e.g.
-// https://kekehyuguestregistration-egopc3mgf.vercel.app
-const VERCEL_PREVIEW_PATTERN = /^https:\/\/kekehyuguestregistration(-[a-z0-9-]+)?\.vercel\.app$/;
+// https://guest-frontend-uhztcwis8-ricsignapan-1966.vercel.app
+const VERCEL_PREVIEW_PATTERN = /^https:\/\/guest-frontend(-[a-z0-9-]+)?\.vercel\.app$/;
 
 // Shared between the HTTP CORS setup (main.ts) and the WebSocket gateway
 // (realtime.gateway.ts) so the two allow-lists can never drift apart.
 export function getAllowedOrigins(configService: ConfigService): string[] {
   const defaultOrigins = [
-    'https://kekehyuguestregistration.vercel.app', // Production frontend (Vercel)
+    'https://guest-frontend-nine.vercel.app', // Production frontend (Vercel)
     'http://localhost:4200', // Development frontend (local)
     'http://127.0.0.1:4200', // Development frontend (local IP)
     'http://localhost:3000', // Development alternative port
