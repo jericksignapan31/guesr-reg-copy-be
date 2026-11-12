@@ -71,7 +71,7 @@ import { RolesGuard } from './common/guards/roles.guard';
           autoLoadEntities: true,
           synchronize: configService.get('NODE_ENV') === 'development',
           migrations: ['dist/migrations/*{.ts,.js}'],
-          migrationsRun: true,
+          migrationsRun: false,
           ssl:
             configService.get('DB_SSL') === 'true'
               ? { rejectUnauthorized: false }
