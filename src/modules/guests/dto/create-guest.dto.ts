@@ -1,0 +1,229 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsBoolean,
+  IsDateString,
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  ValidateIf,
+  ValidateNested,
+} from 'class-validator';
+
+export class AccompanyingGuestDto {
+  @ApiProperty({ example: 'Juan' })
+  @IsString()
+  @IsNotEmpty()
+  firstName: string;
+
+  @ApiProperty({ example: 'Dela Cruz' })
+  @IsString()
+  @IsNotEmpty()
+  lastName: string;
+
+  @ApiPropertyOptional({ example: 'Santos' })
+  @IsString()
+  @IsOptional()
+  middleName?: string;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  validIdPresented: boolean;
+
+  @ApiPropertyOptional({ description: 'Base64 encoded signature' })
+  @IsString()
+  @IsOptional()
+  signature?: string;
+}
+
+export class ReservationDto {
+  @ApiPropertyOptional({ example: '8412993383856' })
+  @IsString()
+  @IsOptional()
+  reservationNumber?: string;
+
+  @ApiProperty({ example: '408' })
+  @IsString()
+  @IsNotEmpty()
+  roomNumber: string;
+
+  @ApiPropertyOptional({ example: 'STANDARD SINGLE', description: 'Room type name (will be converted to UUID)' })
+  @IsString()
+  @IsOptional()
+  roomType?: string;
+
+  @ApiPropertyOptional({ description: 'Room type UUID (optional if roomType name is provided)' })
+  @ValidateIf((o) => o.roomTypeId && o.roomTypeId !== '')
+  @IsUUID()
+  @IsOptional()
+  roomTypeId?: string;
+
+  @ApiProperty({ example: '2026-04-08' })
+  @IsDateString()
+  @IsNotEmpty()
+  checkInDate: string;
+
+  @ApiPropertyOptional({ example: '2026-04-09' })
+  @IsDateString()
+  @IsOptional()
+  checkOutDate?: string;
+
+  @ApiPropertyOptional({ example: '14:00' })
+  @IsString()
+  @IsOptional()
+  checkInTime?: string;
+
+  @ApiPropertyOptional({ example: '11:00' })
+  @IsString()
+  @IsOptional()
+  checkOutTime?: string;
+
+  @ApiPropertyOptional({ type: [AccompanyingGuestDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AccompanyingGuestDto)
+  @IsOptional()
+  accompanyingGuests?: AccompanyingGuestDto[];
+}
+
+export class GuestAgreementDto {
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyHousekeeping1: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyHousekeeping2: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policySmoking: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyCorkage: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyNoPets: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyNegligence: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyMinors: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyParking: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policySafe: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyForceMajeure: boolean;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  policyDataPrivacy: boolean;
+
+  @ApiProperty({ example: 'Cherille Antonio' })
+  @IsString()
+  @IsNotEmpty()
+  guestPrintedName: string;
+
+  @ApiProperty({ description: 'Base64 encoded signature' })
+  @IsString()
+  @IsNotEmpty()
+  guestSignature: string;
+
+  @ApiProperty({ example: '2026-04-08' })
+  @IsDateString()
+  @IsNotEmpty()
+  signatureDate: string;
+
+  @ApiPropertyOptional({
+    description: 'Ignored - the backend fills this in from the registering user\'s profile',
+  })
+  @IsString()
+  @IsOptional()
+  processedByName?: string;
+
+  @ApiPropertyOptional({
+    description: 'Ignored - the backend fills this in from the registering user\'s stored profile signature',
+  })
+  @IsString()
+  @IsOptional()
+  processedBySignature?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  remarks?: string;
+
+  @ApiPropertyOptional({ description: 'Backup room types for PDF fallback (comma-separated)' })
+  @IsString()
+  @IsOptional()
+  roomTypesBackup?: string;
+}
+
+export class CreateGuestDto {
+  @ApiProperty({ example: 'Cherille' })
+  @IsString()
+  @IsNotEmpty()
+  firstName: string;
+
+  @ApiProperty({ example: 'Antonio' })
+  @IsString()
+  @IsNotEmpty()
+  lastName: string;
+
+  @ApiPropertyOptional({ example: 'Santos' })
+  @IsString()
+  @IsOptional()
+  middleName?: string;
+
+  @ApiPropertyOptional({ example: '0917 826 8950' })
+  @IsString()
+  @IsOptional()
+  phoneNumber?: string;
+
+  @ApiPropertyOptional({ example: 'reservations@email.com' })
+  @IsEmail()
+  @IsOptional()
+  email?: string;
+
+  @ApiPropertyOptional({ example: 'Philippines' })
+  @IsString()
+  @IsOptional()
+  country?: string;
+
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  validIdPresented: boolean;
+
+  @ApiPropertyOptional({ example: 'ABC 1234' })
+  @IsString()
+  @IsOptional()
+  vehiclePlateNo?: string;
+
+  @ApiProperty({ type: [ReservationDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReservationDto)
+  @IsNotEmpty()
+  reservations: ReservationDto[];
+
+  @ApiProperty({ type: GuestAgreementDto })
+  @ValidateNested()
+  @Type(() => GuestAgreementDto)
+  @IsNotEmpty()
+  agreement: GuestAgreementDto;
+}

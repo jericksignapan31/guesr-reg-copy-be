@@ -1,0 +1,553 @@
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+  Logger,
+  Inject,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Repository, MoreThanOrEqual, Between } from 'typeorm';
+import { Guest } from './entities/guest.entity';
+import { Reservation, ReservationStatus } from './entities/reservation.entity';
+import { AccompanyingGuest } from './entities/accompanying-guest.entity';
+import { GuestAgreement } from './entities/guest-agreement.entity';
+import { CreateGuestDto } from './dto/create-guest.dto';
+import { UpdateGuestDto } from './dto/update-guest.dto';
+import { Role } from '../../common/enums/role.enum';
+import { STORAGE_SERVICE } from '../../common/services';
+import type { StorageService } from '../../common/services';
+import { RoomTypesService } from '../room-types/room-types.service';
+import { HotelSettingsService } from '../hotel-settings/hotel-settings.service';
+import { UsersService } from '../users/users.service';
+import { computeForecast, MonthlyCount } from './utils/forecast.util';
+
+@Injectable()
+export class GuestsService {
+  private readonly logger = new Logger(GuestsService.name);
+
+  constructor(
+    @InjectRepository(Guest)
+    private readonly guestRepository: Repository<Guest>,
+    @InjectRepository(Reservation)
+    private readonly reservationRepository: Repository<Reservation>,
+    @InjectRepository(AccompanyingGuest)
+    private readonly accompanyingGuestRepository: Repository<AccompanyingGuest>,
+    @InjectRepository(GuestAgreement)
+    private readonly agreementRepository: Repository<GuestAgreement>,
+    @Inject(STORAGE_SERVICE)
+    private readonly storageService: StorageService,
+    private readonly roomTypesService: RoomTypesService,
+    private readonly eventEmitter: EventEmitter2,
+    private readonly hotelSettingsService: HotelSettingsService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  async create(
+    createGuestDto: CreateGuestDto,
+    registeredById: string,
+  ): Promise<Guest> {
+    // The front desk signature is no longer drawn per-registration - it's
+    // uploaded once to the registering user's profile and attached here
+    // server-side, both to stop duplicating a large image on every submit
+    // (bloating the request body) and so it can't be spoofed via the DTO.
+    const registeredBy = await this.usersService.findOne(registeredById);
+    if (!registeredBy.signature) {
+      throw new BadRequestException(
+        'Please set up your signature in your profile before registering a guest.',
+      );
+    }
+
+    // Create guest
+    const guest = this.guestRepository.create({
+      firstName: createGuestDto.firstName,
+      lastName: createGuestDto.lastName,
+      middleName: createGuestDto.middleName,
+      phoneNumber: createGuestDto.phoneNumber,
+      email: createGuestDto.email || undefined, // Handle empty email
+      country: createGuestDto.country,
+      validIdPresented: createGuestDto.validIdPresented,
+      vehiclePlateNo: createGuestDto.vehiclePlateNo,
+      registeredById,
+    });
+
+    const savedGuest = await this.guestRepository.save(guest);
+
+    // Create reservations
+    for (const resDto of createGuestDto.reservations) {
+      // Resolve roomType string to roomTypeId UUID if provided
+      let resolvedRoomTypeId: string | undefined = resDto.roomTypeId;
+      
+      if (!resolvedRoomTypeId && resDto.roomType) {
+        this.logger.log(`Resolving room type: "${resDto.roomType}"`);
+        const resolved = await this.roomTypesService.resolveRoomTypeId(resDto.roomType);
+        resolvedRoomTypeId = resolved || undefined;
+        
+        if (resolvedRoomTypeId) {
+          this.logger.log(`Room type "${resDto.roomType}" resolved to UUID: ${resolvedRoomTypeId}`);
+        } else {
+          this.logger.warn(`Room type "${resDto.roomType}" not found, storing without roomTypeId`);
+        }
+      }
+
+      // Generate reservation number if not provided
+      const reservationNumber = resDto.reservationNumber || this.generateReservationNumber();
+
+      const reservation = this.reservationRepository.create({
+        guestId: savedGuest.id,
+        reservationNumber,
+        roomNumber: resDto.roomNumber,
+        roomTypeId: resolvedRoomTypeId,
+        checkInDate: new Date(resDto.checkInDate),
+        checkOutDate: resDto.checkOutDate ? new Date(resDto.checkOutDate) : undefined,
+        checkInTime: resDto.checkInTime,
+        checkOutTime: resDto.checkOutTime,
+        status: ReservationStatus.CHECKED_IN,
+      });
+
+      const savedReservation = await this.reservationRepository.save(reservation);
+
+      // Create accompanying guests for this reservation
+      if (resDto.accompanyingGuests && resDto.accompanyingGuests.length > 0) {
+        for (const agDto of resDto.accompanyingGuests) {
+          const accompanyingGuest = this.accompanyingGuestRepository.create({
+            reservationId: savedReservation.id,
+            firstName: agDto.firstName,
+            lastName: agDto.lastName,
+            middleName: agDto.middleName,
+            validIdPresented: agDto.validIdPresented,
+            signature: agDto.signature,
+          });
+          await this.accompanyingGuestRepository.save(accompanyingGuest);
+        }
+      }
+    }
+
+    // Create agreement
+    const agreement = this.agreementRepository.create({
+      guestId: savedGuest.id,
+      ...createGuestDto.agreement,
+      signatureDate: new Date(createGuestDto.agreement.signatureDate),
+      processedByName: `${registeredBy.firstName} ${registeredBy.lastName}`,
+      processedBySignature: registeredBy.signature,
+    });
+    await this.agreementRepository.save(agreement);
+
+    const createdGuest = await this.findOne(savedGuest.id);
+    this.eventEmitter.emit('guest.created', { id: createdGuest.id });
+    return createdGuest;
+  }
+
+  async findAll(
+    userId?: string,
+    userRole?: Role,
+  ): Promise<Guest[]> {
+    const queryBuilder = this.guestRepository
+      .createQueryBuilder('guest')
+      .leftJoinAndSelect('guest.reservations', 'reservation')
+      .leftJoinAndSelect('reservation.roomType', 'roomType')
+      .leftJoinAndSelect('reservation.accompanyingGuests', 'accompanyingGuest')
+      .leftJoinAndSelect('guest.agreement', 'agreement')
+      .leftJoinAndSelect('guest.registeredBy', 'registeredBy')
+      .orderBy('guest.createdAt', 'DESC');
+
+    // Front desk can only see their own registrations
+    if (userRole === Role.FRONT_DESK && userId) {
+      queryBuilder.where('guest.registeredById = :userId', { userId });
+    }
+
+    const guests = await queryBuilder.getMany();
+
+    // Remove sensitive data from registeredBy
+    return guests.map((guest) => {
+      if (guest.registeredBy) {
+        delete (guest.registeredBy as any).password;
+      }
+      return guest;
+    });
+  }
+
+  async findOne(id: string): Promise<Guest> {
+    this.logger.debug(`Fetching guest with ID: ${id}`);
+    
+    const guest = await this.guestRepository.findOne({
+      where: { id },
+      relations: [
+        'reservations',
+        'reservations.roomType',
+        'reservations.accompanyingGuests',
+        'agreement',
+        'registeredBy',
+      ],
+    });
+
+    if (!guest) {
+      this.logger.warn(`Guest not found with ID: ${id}`);
+      throw new NotFoundException('Guest not found');
+    }
+
+    // Log roomType info for each reservation
+    if (guest.reservations && guest.reservations.length > 0) {
+      guest.reservations.forEach((res, index) => {
+        this.logger.debug(
+          `Reservation ${index}: roomTypeId=${res.roomTypeId}, roomType=${res.roomType ? res.roomType.name : 'null'}`,
+        );
+      });
+    }
+
+    if (guest.registeredBy) {
+      delete (guest.registeredBy as any).password;
+    }
+
+    return guest;
+  }
+
+  async update(
+    id: string,
+    updateGuestDto: UpdateGuestDto,
+    userId: string,
+    userRole: Role,
+  ): Promise<Guest> {
+    const guest = await this.findOne(id);
+
+    // Handle pdfPath → pdfUrl mapping (frontend sends pdfPath, we store as pdfUrl)
+    if ((updateGuestDto as any).pdfPath && !updateGuestDto.pdfUrl) {
+      updateGuestDto.pdfUrl = (updateGuestDto as any).pdfPath;
+      delete (updateGuestDto as any).pdfPath;
+    }
+
+    Object.assign(guest, updateGuestDto);
+    await this.guestRepository.save(guest);
+
+    const updated = await this.findOne(id);
+    this.eventEmitter.emit('guest.updated', { id: updated.id });
+    return updated;
+  }
+
+  async remove(id: string, userRole: Role): Promise<void> {
+    if (userRole !== Role.SUPER_ADMIN) {
+      throw new ForbiddenException('Only Super Admin can delete guests');
+    }
+
+    const guest = await this.findOne(id);
+    await this.guestRepository.remove(guest);
+    this.eventEmitter.emit('guest.deleted', { id });
+  }
+
+  // Statistics for dashboard
+  async getStatistics(period: 'today' | 'week' | 'month' | 'year') {
+    const now = new Date();
+    let startDate: Date;
+
+    switch (period) {
+      case 'today':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case 'week':
+        const dayOfWeek = now.getDay();
+        startDate = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate() - dayOfWeek,
+        );
+        break;
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        break;
+      case 'year':
+        startDate = new Date(now.getFullYear(), 0, 1);
+        break;
+    }
+
+    const guests = await this.guestRepository.find({
+      where: {
+        createdAt: MoreThanOrEqual(startDate),
+      },
+      relations: ['reservations', 'registeredBy'],
+    });
+
+    // Count by front desk
+    const byFrontDesk = new Map<string, { user: any; count: number }>();
+    for (const guest of guests) {
+      const userId = guest.registeredById;
+      if (!byFrontDesk.has(userId)) {
+        byFrontDesk.set(userId, {
+          user: guest.registeredBy
+            ? {
+                id: guest.registeredBy.id,
+                firstName: guest.registeredBy.firstName,
+                lastName: guest.registeredBy.lastName,
+              }
+            : null,
+          count: 0,
+        });
+      }
+      byFrontDesk.get(userId)!.count++;
+    }
+
+    return {
+      totalGuests: guests.length,
+      totalReservations: guests.reduce(
+        (sum, g) => sum + (g.reservations?.length || 0),
+        0,
+      ),
+      byFrontDesk: Array.from(byFrontDesk.values()),
+    };
+  }
+
+  async getGuestsForPeriod(period: 'today' | 'week' | 'month' | 'year') {
+    const now = new Date();
+    let startDate: Date;
+
+    switch (period) {
+      case 'today':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case 'week':
+        const dayOfWeek = now.getDay();
+        startDate = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate() - dayOfWeek,
+        );
+        break;
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        break;
+      case 'year':
+        startDate = new Date(now.getFullYear(), 0, 1);
+        break;
+    }
+
+    return this.guestRepository.find({
+      where: {
+        createdAt: MoreThanOrEqual(startDate),
+      },
+      relations: [
+        'reservations',
+        'reservations.roomType',
+        'registeredBy',
+      ],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  // Update PDF path after generation
+  async updatePdfPath(guestId: string, pdfPath: string): Promise<void> {
+    await this.agreementRepository.update(
+      { guestId },
+      { pdfPath },
+    );
+  }
+
+  // Upload PDF to Supabase Storage
+  async uploadPdfToStorage(
+    guestId: string,
+    fileBuffer: Buffer,
+    fileName: string,
+  ): Promise<{ message: string; pdfUrl: string }> {
+    // Verify guest exists
+    const guest = await this.findOne(guestId);
+    if (!guest) {
+      throw new NotFoundException('Guest not found');
+    }
+
+    // Generate unique filename with timestamp
+    const timestamp = Date.now();
+    const uniqueFileName = `${timestamp}-${fileName}`;
+
+    try {
+      // Upload to Supabase Storage
+      const pdfUrl = await this.storageService.uploadPdf(
+        fileBuffer,
+        uniqueFileName,
+        guestId,
+      );
+
+      // Update guest agreement with PDF URL
+      await this.updatePdfPath(guestId, pdfUrl);
+
+      return {
+        message: 'PDF uploaded successfully',
+        pdfUrl,
+      };
+    } catch (error) {
+      throw new Error(`Failed to upload PDF: ${error.message}`);
+    }
+  }
+
+  // Get monthly comparison data for this year vs last year
+  async getMonthlyComparison(): Promise<{
+    months: string[];
+    thisYear: number[];
+    lastYear: number[];
+  }> {
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+
+    const currentYear = new Date().getFullYear(); // 2026
+    const previousYear = currentYear - 1; // 2025
+
+    const thisYear: number[] = [];
+    const lastYear: number[] = [];
+
+    // Count guests for each month using portable date-range filters
+    // (avoid DB-specific functions like Postgres' EXTRACT(), which sql.js/SQLite doesn't support)
+    for (let month = 1; month <= 12; month++) {
+      const thisYearStart = new Date(currentYear, month - 1, 1);
+      const thisYearEnd = new Date(currentYear, month, 0, 23, 59, 59, 999);
+
+      const thisYearGuests = await this.guestRepository.count({
+        where: { createdAt: Between(thisYearStart, thisYearEnd) },
+      });
+
+      thisYear.push(thisYearGuests);
+
+      const lastYearStart = new Date(previousYear, month - 1, 1);
+      const lastYearEnd = new Date(previousYear, month, 0, 23, 59, 59, 999);
+
+      const lastYearGuests = await this.guestRepository.count({
+        where: { createdAt: Between(lastYearStart, lastYearEnd) },
+      });
+
+      lastYear.push(lastYearGuests);
+    }
+
+    return {
+      months,
+      thisYear,
+      lastYear,
+    };
+  }
+
+  private static readonly DAY_NAMES = [
+    'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+  ];
+  private static readonly MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+
+  // Booking analytics: occupancy, peak days/months, avg length of stay,
+  // cancellation rate, and a statistical forecast. All computed in JS from a
+  // single `find()` (small per-hotel dataset) to stay consistent with the
+  // rest of this file's DB-portability approach (no raw SQL/date functions).
+  async getBookingAnalytics(period: 'today' | 'week' | 'month' | 'year') {
+    const now = new Date();
+    let startDate: Date;
+
+    switch (period) {
+      case 'today':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        break;
+      case 'week': {
+        const dayOfWeek = now.getDay();
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOfWeek);
+        break;
+      }
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        break;
+      case 'year':
+        startDate = new Date(now.getFullYear(), 0, 1);
+        break;
+    }
+    const endDate = now;
+
+    const all = await this.reservationRepository.find();
+
+    const inPeriod = all.filter(
+      (r) => r.checkInDate >= startDate && r.checkInDate <= endDate,
+    );
+
+    const totalReservations = inPeriod.length;
+    const cancelledReservations = inPeriod.filter(
+      (r) => r.status === ReservationStatus.CANCELLED,
+    ).length;
+    const cancellationRatePercent = totalReservations
+      ? (cancelledReservations / totalReservations) * 100
+      : 0;
+
+    const effectiveCheckOut = (r: Reservation): Date =>
+      r.checkOutDate ?? new Date(r.checkInDate.getTime() + 24 * 60 * 60 * 1000);
+    const nightsBetween = (from: Date, to: Date): number =>
+      Math.max(0, (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
+
+    const avgLengthOfStayDays = totalReservations
+      ? inPeriod.reduce(
+          (sum, r) => sum + Math.max(1, nightsBetween(r.checkInDate, effectiveCheckOut(r))),
+          0,
+        ) / totalReservations
+      : null;
+
+    const { totalRooms } = await this.hotelSettingsService.getSettings();
+    let occupancyRatePercent: number | null = null;
+    if (totalRooms > 0) {
+      const occupiedRoomNights = all.reduce((sum, r) => {
+        const overlapStart = r.checkInDate > startDate ? r.checkInDate : startDate;
+        const checkOut = effectiveCheckOut(r);
+        const overlapEnd = checkOut < endDate ? checkOut : endDate;
+        return sum + nightsBetween(overlapStart, overlapEnd);
+      }, 0);
+      const availableRoomNights = totalRooms * Math.max(1, nightsBetween(startDate, endDate));
+      occupancyRatePercent = Math.max(0, (occupiedRoomNights / availableRoomNights) * 100);
+    }
+
+    // All-time (not period-filtered) — "which day/month is typically busiest"
+    const dayOfWeekCounts = new Array(7).fill(0);
+    const monthCounts = new Array(12).fill(0);
+    for (const r of all) {
+      dayOfWeekCounts[r.checkInDate.getDay()]++;
+      monthCounts[r.checkInDate.getMonth()]++;
+    }
+    const peakDayOfWeek = GuestsService.DAY_NAMES.map((day, i) => ({ day, count: dayOfWeekCounts[i] }));
+    const peakMonth = GuestsService.MONTH_NAMES.map((month, i) => ({ month, count: monthCounts[i] }));
+
+    const monthlyMap = new Map<string, number>();
+    for (const r of all) {
+      const key = `${r.checkInDate.getFullYear()}-${String(r.checkInDate.getMonth() + 1).padStart(2, '0')}`;
+      monthlyMap.set(key, (monthlyMap.get(key) ?? 0) + 1);
+    }
+    const monthlySeries: MonthlyCount[] = Array.from(monthlyMap.entries())
+      .map(([yearMonth, count]) => ({ yearMonth, count }))
+      .sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+    const forecast = computeForecast(monthlySeries, 6);
+
+    return {
+      period,
+      totalReservations,
+      cancelledReservations,
+      cancellationRatePercent,
+      avgLengthOfStayDays,
+      occupancyRatePercent,
+      totalRooms,
+      peakDayOfWeek,
+      peakMonth,
+      forecast,
+    };
+  }
+
+  /**
+   * Generate a unique reservation number
+   * Format: YYYYMMDD-XXXXXX (date + 6 random digits)
+   */
+  private generateReservationNumber(): string {
+    const now = new Date();
+    const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const randomPart = Math.floor(100000 + Math.random() * 900000).toString();
+    return `${datePart}-${randomPart}`;
+  }
+}
