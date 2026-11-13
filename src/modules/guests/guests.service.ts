@@ -23,6 +23,23 @@ import { HotelSettingsService } from '../hotel-settings/hotel-settings.service';
 import { UsersService } from '../users/users.service';
 import { computeForecast, MonthlyCount } from './utils/forecast.util';
 
+function normalizeDate(value: Date | string): Date {
+  if (value instanceof Date) {
+    return value;
+  }
+
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (dateOnly) {
+    return new Date(
+      Number(dateOnly[1]),
+      Number(dateOnly[2]) - 1,
+      Number(dateOnly[3]),
+    );
+  }
+
+  return new Date(value);
+}
+
 @Injectable()
 export class GuestsService {
   private readonly logger = new Logger(GuestsService.name);
@@ -467,7 +484,13 @@ export class GuestsService {
     }
     const endDate = now;
 
-    const all = await this.reservationRepository.find();
+    const all = (await this.reservationRepository.find()).map((reservation) => ({
+      ...reservation,
+      checkInDate: normalizeDate(reservation.checkInDate),
+      checkOutDate: reservation.checkOutDate
+        ? normalizeDate(reservation.checkOutDate)
+        : null,
+    }));
 
     const inPeriod = all.filter(
       (r) => r.checkInDate >= startDate && r.checkInDate <= endDate,
@@ -481,7 +504,10 @@ export class GuestsService {
       ? (cancelledReservations / totalReservations) * 100
       : 0;
 
-    const effectiveCheckOut = (r: Reservation): Date =>
+    const effectiveCheckOut = (r: {
+      checkInDate: Date;
+      checkOutDate: Date | null;
+    }): Date =>
       r.checkOutDate ?? new Date(r.checkInDate.getTime() + 24 * 60 * 60 * 1000);
     const nightsBetween = (from: Date, to: Date): number =>
       Math.max(0, (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
