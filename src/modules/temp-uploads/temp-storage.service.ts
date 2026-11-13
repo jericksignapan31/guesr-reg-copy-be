@@ -10,7 +10,12 @@ export class TempStorageService {
 
   constructor(private configService: ConfigService) {
     const supabaseUrl = this.configService.get<string>('SUPABASE_URL') || '';
-    const supabaseKey = this.configService.get<string>('SUPABASE_KEY') || '';
+    // Use the service role key so server-side uploads bypass Storage RLS
+    // policies (this client never runs in the browser, so it's safe here).
+    const supabaseKey =
+      this.configService.get<string>('SUPABASE_SECRET_KEY') ||
+      this.configService.get<string>('SUPABASE_KEY') ||
+      '';
 
     if (!supabaseUrl || !supabaseKey) {
       throw new Error('Supabase URL and Key are required');
